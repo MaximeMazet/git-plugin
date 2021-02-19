@@ -47,20 +47,22 @@ public class GitPublisher extends Recorder implements Serializable {
     private boolean pushMerge;
     private boolean pushOnlyIfSuccess;
     private boolean forcePush;
-    
+    private boolean deleteBranch;
+
     private List<TagToPush> tagsToPush;
     // Pushes HEAD to these locations
     private List<BranchToPush> branchesToPush;
     // notes support
     private List<NoteToPush> notesToPush;
-    
+
     @DataBoundConstructor
     public GitPublisher(List<TagToPush> tagsToPush,
                         List<BranchToPush> branchesToPush,
                         List<NoteToPush> notesToPush,
                         boolean pushOnlyIfSuccess,
                         boolean pushMerge,
-                        boolean forcePush) {
+                        boolean forcePush,
+                        boolean deleteBranch) {
         this.tagsToPush = tagsToPush;
         this.branchesToPush = branchesToPush;
         this.notesToPush = notesToPush;
@@ -68,12 +70,13 @@ public class GitPublisher extends Recorder implements Serializable {
         this.pushOnlyIfSuccess = pushOnlyIfSuccess;
         this.forcePush = forcePush;
         this.configVersion = 2L;
+        this.deleteBranch = deleteBranch;
     }
 
     public boolean isPushOnlyIfSuccess() {
         return pushOnlyIfSuccess;
     }
-    
+
     public boolean isPushMerge() {
         return pushMerge;
     }
@@ -102,7 +105,11 @@ public class GitPublisher extends Recorder implements Serializable {
         }
         return !notesToPush.isEmpty();
     }
-    
+
+    public boolean isDeleteBranch() {
+        return deleteBranch;
+    }
+
     public List<TagToPush> getTagsToPush() {
         if (tagsToPush == null) {
             tagsToPush = new ArrayList<>();
@@ -118,7 +125,7 @@ public class GitPublisher extends Recorder implements Serializable {
 
         return branchesToPush;
     }
-    
+
     public List<NoteToPush> getNotesToPush() {
         if (notesToPush == null) {
             notesToPush = new ArrayList<>();
@@ -126,28 +133,28 @@ public class GitPublisher extends Recorder implements Serializable {
 
         return notesToPush;
     }
-    
-    
+
+
     public BuildStepMonitor getRequiredMonitorService() {
         return BuildStepMonitor.NONE;
     }
 
-    private String replaceAdditionalEnvironmentalVariables(String input, AbstractBuild<?, ?> build){
-    	if (build == null){
-    		return input;
-    	}
+    private String replaceAdditionalEnvironmentalVariables(String input, AbstractBuild<?, ?> build) {
+        if (build == null) {
+            return input;
+        }
         String buildResult = "";
         Result result = build.getResult();
         if (result != null) {
             buildResult = result.toString();
         }
         String buildDuration = build.getDurationString().replaceAll("and counting", "");
-        
+
         input = input.replaceAll("\\$BUILDRESULT", buildResult);
         input = input.replaceAll("\\$BUILDDURATION", buildDuration);
         return input;
     }
-    
+
     @Override
     public boolean perform(AbstractBuild<?, ?> build,
                            Launcher launcher, final BuildListener listener)
@@ -175,16 +182,25 @@ public class GitPublisher extends Recorder implements Serializable {
         if (pushOnlyIfSuccess && buildResult.isWorseThan(Result.SUCCESS)) {
             listener.getLogger().println("Build did not succeed and the project is configured to only push after a successful build, so no pushing will occur.");
             return true;
-        }
-        else {
+        }else {
             EnvVars environment = build.getEnvironment(listener);
 
             UnsupportedCommand cmd = new UnsupportedCommand();
             cmd.gitPublisher(true);
-            final GitClient git  = gitSCM.createClient(listener, environment, build, build.getWorkspace(), cmd);
+            final GitClient git = gitSCM.createClient(listener, environment, build, build.getWorkspace(), cmd);
 
             URIish remoteURI;
 
+
+            if (deleteBranch && buildResult.isWorseThan(Result.SUCCESS)) {
+                PreBuildMergeOptions mergeOptions = gitSCM.getMergeOptions();
+                String mergeTarget = environment.expand(mergeOptions.getRemoteBranchName());
+                try {
+                    git.deleteBranch(mergeTarget);
+                } catch (GitException e) {
+                    e.printStackTrace();
+                }
+            }
             // If we're pushing the merge back...
             if (pushMerge) {
                 try {
@@ -240,7 +256,7 @@ public class GitPublisher extends Recorder implements Serializable {
                     final String targetRepo = environment.expand(t.getTargetRepoName());
 
                     try {
-                    	// Lookup repository with unexpanded name as GitSCM stores them unexpanded
+                        // Lookup repository with unexpanded name as GitSCM stores them unexpanded
                         RemoteConfig remote = gitSCM.getRepositoryByName(t.getTargetRepoName());
 
                         if (remote == null)
@@ -255,18 +271,17 @@ public class GitPublisher extends Recorder implements Serializable {
                                 throw new AbortException("Tag " + tagName + " already exists and Create Tag is specified, so failing.");
                             }
 
-                            if (tagMessage.length()==0) {
+                            if (tagMessage.length() == 0) {
                                 git.tag(tagName, "Jenkins Git plugin tagging with " + tagName);
                             } else {
                                 git.tag(tagName, tagMessage);
                             }
-                        }
-                        else if (!tagExists) {
+                        } else if (!tagExists) {
                             throw new AbortException("Tag " + tagName + " does not exist and Create Tag is not specified, so failing.");
                         }
 
                         listener.getLogger().println("Pushing tag " + tagName + " to repo "
-                                                     + targetRepo);
+                                + targetRepo);
 
                         remoteURI = remote.getURIs().get(0);
                         PushCommand push = git.push().to(remoteURI).ref(tagName).force(forcePush);
@@ -277,7 +292,6 @@ public class GitPublisher extends Recorder implements Serializable {
                     }
                 }
             }
-            
             if (isPushBranches()) {
                 for (final BranchToPush b : branchesToPush) {
                     if (b.getBranchName() == null)
@@ -288,9 +302,9 @@ public class GitPublisher extends Recorder implements Serializable {
 
                     final String branchName = environment.expand(b.getBranchName());
                     final String targetRepo = environment.expand(b.getTargetRepoName());
-                    
+
                     try {
-                    	// Lookup repository with unexpanded name as GitSCM stores them unexpanded
+                        // Lookup repository with unexpanded name as GitSCM stores them unexpanded
                         RemoteConfig remote = gitSCM.getRepositoryByName(b.getTargetRepoName());
 
                         if (remote == null)
@@ -311,7 +325,7 @@ public class GitPublisher extends Recorder implements Serializable {
                         }
 
                         listener.getLogger().println("Pushing HEAD to branch " + branchName + " at repo "
-                                                     + targetRepo);
+                                + targetRepo);
                         PushCommand push = git.push().to(remoteURI).ref("HEAD:" + branchName).force(forcePush);
                         push.execute();
                     } catch (GitException e) {
@@ -320,7 +334,7 @@ public class GitPublisher extends Recorder implements Serializable {
                     }
                 }
             }
-                     
+
             if (isPushNotes()) {
                 for (final NoteToPush b : notesToPush) {
                     if (b.getnoteMsg() == null)
@@ -332,9 +346,9 @@ public class GitPublisher extends Recorder implements Serializable {
                     final String noteNamespace = environment.expand(b.getnoteNamespace());
                     final String targetRepo = environment.expand(b.getTargetRepoName());
                     final boolean noteReplace = b.getnoteReplace();
-                    
+
                     try {
-                    	// Lookup repository with unexpanded name as GitSCM stores them unexpanded
+                        // Lookup repository with unexpanded name as GitSCM stores them unexpanded
                         RemoteConfig remote = gitSCM.getRepositoryByName(b.getTargetRepoName());
 
                         if (remote == null) {
@@ -345,23 +359,23 @@ public class GitPublisher extends Recorder implements Serializable {
                         // expand environment variables in remote repository
                         remote = gitSCM.getParamExpandedRepo(environment, remote);
 
-                        listener.getLogger().println("Adding note to namespace \""+noteNamespace +"\":\n" + noteMsg + "\n******" );
+                        listener.getLogger().println("Adding note to namespace \"" + noteNamespace + "\":\n" + noteMsg + "\n******");
 
-                        if ( noteReplace )
-                            git.addNote(    noteMsg, noteNamespace );
+                        if (noteReplace)
+                            git.addNote(noteMsg, noteNamespace);
                         else
-                            git.appendNote( noteMsg, noteNamespace );
+                            git.appendNote(noteMsg, noteNamespace);
 
                         remoteURI = remote.getURIs().get(0);
                         PushCommand push = git.push().to(remoteURI).ref("refs/notes/*").force(forcePush);
                         push.execute();
                     } catch (GitException e) {
-                        e.printStackTrace(listener.error("Failed to add note: \n" + noteMsg  + "\n******"));
+                        e.printStackTrace(listener.error("Failed to add note: \n" + noteMsg + "\n******"));
                         return false;
                     }
                 }
             }
-            
+
             return true;
         }
     }
@@ -369,11 +383,12 @@ public class GitPublisher extends Recorder implements Serializable {
     /**
      * Handles migration from earlier version - if we were pushing merges, we'll be
      * instantiated but tagsToPush will be null rather than empty.
+     *
      * @return This.
      */
     protected Object readResolve() {
         // Default unspecified to v0
-        if(configVersion == null)
+        if (configVersion == null)
             this.configVersion = 0L;
 
         if (this.configVersion < 1L) {
@@ -384,8 +399,8 @@ public class GitPublisher extends Recorder implements Serializable {
 
         return this;
     }
-    
-    @Extension(ordinal=-1)
+
+    @Extension(ordinal = -1)
     public static class DescriptorImpl extends BuildStepDescriptor<Publisher> {
         public String getDisplayName() {
             return "Git Publisher";
@@ -398,16 +413,17 @@ public class GitPublisher extends Recorder implements Serializable {
 
         /**
          * Performs on-the-fly validation on the file mask wildcard.
-         *
+         * <p>
          * I don't think this actually ever gets called, but I'm modernizing it anyway.
+         *
          * @param project project context for evaluation
-         * @param value string to be evaluated
+         * @param value   string to be evaluated
          * @return form validation result
          * @throws IOException on input or output error
          */
         public FormValidation doCheck(@AncestorInPath AbstractProject project, @QueryParameter String value)
-            throws IOException  {
-            return FilePath.validateFileMask(project.getSomeWorkspace(),value);
+                throws IOException {
+            return FilePath.validateFileMask(project.getSomeWorkspace(), value);
         }
 
         public FormValidation doCheckTagName(@QueryParameter String value) {
@@ -417,11 +433,11 @@ public class GitPublisher extends Recorder implements Serializable {
         public FormValidation doCheckBranchName(@QueryParameter String value) {
             return checkFieldNotEmpty(value, Messages.GitPublisher_Check_BranchName());
         }
-        
+
         public FormValidation doCheckNoteMsg(@QueryParameter String value) {
             return checkFieldNotEmpty(value, Messages.GitPublisher_Check_Note());
         }
-        
+
         public FormValidation doCheckRemote(
                 @AncestorInPath AbstractProject project, StaplerRequest req)
                 throws IOException, ServletException {
@@ -450,7 +466,7 @@ public class GitPublisher extends Recorder implements Serializable {
 
             return FormValidation.ok();
         }
-                
+
         public boolean isApplicable(Class<? extends AbstractProject> jobType) {
             return true;
         }
@@ -467,13 +483,13 @@ public class GitPublisher extends Recorder implements Serializable {
 
     public static abstract class PushConfig extends AbstractDescribableImpl<PushConfig> implements Serializable {
         private static final long serialVersionUID = 1L;
-        
+
         private String targetRepoName;
 
         public PushConfig(String targetRepoName) {
             this.targetRepoName = Util.fixEmptyAndTrim(targetRepoName);
         }
-        
+
         public String getTargetRepoName() {
             return targetRepoName;
         }
@@ -481,10 +497,10 @@ public class GitPublisher extends Recorder implements Serializable {
         public void setTargetRepoName(String targetRepoName) {
             this.targetRepoName = targetRepoName;
         }
-        
-        public void setEmptyTargetRepoToOrigin(){
-            if (targetRepoName == null || targetRepoName.trim().length()==0){
-            	targetRepoName = "origin";
+
+        public void setEmptyTargetRepoToOrigin() {
+            if (targetRepoName == null || targetRepoName.trim().length() == 0) {
+                targetRepoName = "origin";
             }
         }
     }
@@ -560,7 +576,7 @@ public class GitPublisher extends Recorder implements Serializable {
             }
         }
     }
-    
+
 
     public static final class NoteToPush extends PushConfig {
 
@@ -571,26 +587,26 @@ public class GitPublisher extends Recorder implements Serializable {
         public String getnoteMsg() {
             return noteMsg;
         }
-        
+
         public String getnoteNamespace() {
-        	return noteNamespace;
+            return noteNamespace;
         }
-        
+
         public boolean getnoteReplace() {
-        	return noteReplace;
+            return noteReplace;
         }
 
         @DataBoundConstructor
-        public NoteToPush( String targetRepoName, String noteMsg, String noteNamespace, boolean noteReplace ) {
-        	super(targetRepoName);
+        public NoteToPush(String targetRepoName, String noteMsg, String noteNamespace, boolean noteReplace) {
+            super(targetRepoName);
             this.noteMsg = Util.fixEmptyAndTrim(noteMsg);
             this.noteReplace = noteReplace;
-            
-            if ( noteNamespace != null && noteNamespace.trim().length()!=0)
-    			this.noteNamespace = Util.fixEmptyAndTrim(noteNamespace);
-    		else
-    			this.noteNamespace = "master";
-            
+
+            if (noteNamespace != null && noteNamespace.trim().length() != 0)
+                this.noteNamespace = Util.fixEmptyAndTrim(noteNamespace);
+            else
+                this.noteNamespace = "master";
+
         }
 
         @Extension
@@ -601,5 +617,5 @@ public class GitPublisher extends Recorder implements Serializable {
             }
         }
     }
-    
+
 }
